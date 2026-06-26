@@ -58,6 +58,8 @@ DEFAULT_SKILL_ROOTS = (
 )
 OFFICIAL_GITHUB_OWNERS = {"openai"}
 OFFICIAL_MARKETPLACE_PREFIXES = ("openai-",)
+MAX_SKILL_FILES = 1000
+MAX_SKILL_BYTES = 50 * 1024 * 1024
 
 
 @dataclasses.dataclass
@@ -598,6 +600,53 @@ def dir_digest(path: Path) -> str:
     return h.hexdigest()
 
 
+def safe_remote_subpath(repo_root: Path, subpath: str) -> Path:
+    root = repo_root.resolve()
+    if not subpath:
+        return root
+    raw = Path(subpath)
+    if raw.is_absolute():
+        raise RuntimeError(f"unsafe remote subpath is absolute: {subpath}")
+    if any(part == ".." for part in raw.parts):
+        raise RuntimeError(f"unsafe remote subpath escapes repo: {subpath}")
+    resolved = (repo_root / raw).resolve()
+    if not (resolved == root or resolved.is_relative_to(root)):
+        raise RuntimeError(f"unsafe remote subpath escapes repo: {subpath}")
+    return resolved
+
+
+def validate_skill_tree(
+    path: Path,
+    max_files: int = MAX_SKILL_FILES,
+    max_bytes: int = MAX_SKILL_BYTES,
+) -> None:
+    root = path.resolve()
+    file_count = 0
+    total_bytes = 0
+    for current, dirs, files in os.walk(path):
+        ignore_walk_dirs(dirs)
+        current_path = Path(current)
+        names = [(name, current_path / name) for name in list(dirs) + sorted(files) if name not in IGNORE_FILES]
+        for name, item in names:
+            rel = item.relative_to(path).as_posix()
+            if item.is_symlink():
+                target = os.readlink(item)
+                if os.path.isabs(target):
+                    raise RuntimeError(f"unsafe absolute symlink in remote skill: {rel} -> {target}")
+                resolved_target = (item.parent / target).resolve()
+                if not (resolved_target == root or resolved_target.is_relative_to(root)):
+                    raise RuntimeError(f"unsafe symlink escapes remote skill: {rel} -> {target}")
+                if not resolved_target.exists():
+                    raise RuntimeError(f"broken symlink in remote skill: {rel} -> {target}")
+            file_count += 1
+            if file_count > max_files:
+                raise RuntimeError(f"remote skill has too many files: {file_count} > {max_files}")
+            if item.is_file() and not item.is_symlink():
+                total_bytes += item.stat().st_size
+                if total_bytes > max_bytes:
+                    raise RuntimeError(f"remote skill is too large: {total_bytes} bytes > {max_bytes} bytes")
+
+
 def clone_source(source: SkillSource, tmp: Path) -> Path:
     target = tmp / "repo"
     cmd = ["git", "clone", "--depth", "1"]
@@ -607,7 +656,7 @@ def clone_source(source: SkillSource, tmp: Path) -> Path:
     code, _, err = run(cmd, timeout=300)
     if code != 0:
         raise RuntimeError(err or "git clone failed")
-    sub = target / source.subpath if source.subpath else target
+    sub = safe_remote_subpath(target, source.subpath)
     if not sub.exists():
         raise RuntimeError("subpath not found: " + source.subpath)
     if not (sub / "SKILL.md").exists():
@@ -706,6 +755,7 @@ def check_skill(source: SkillSource, apply: bool, roots: Sequence[Path]) -> Dict
     with tempfile.TemporaryDirectory(prefix="skill-update-") as td:
         try:
             remote = clone_source(source, Path(td))
+            validate_skill_tree(remote)
             same = dir_digest(source.path) == dir_digest(remote)
             if same:
                 result["status"] = "current"
@@ -1171,6 +1221,72 @@ def self_test() -> None:
         assert "Plugins:" in plugin_text
         assert "- 0 needs setup" in plugin_text
         assert "Codex plugins" not in plugin_text.split("Needs Setup:", 1)[1].split("Plugins:", 1)[0]
+
+        repo_root = root / "repo-root"
+        repo_root.mkdir()
+        nested = repo_root / "skills" / "demo"
+        nested.mkdir(parents=True)
+        assert safe_remote_subpath(repo_root, "skills/demo") == nested.resolve()
+        for bad_subpath in ("/tmp/demo", "../demo", "skills/../../demo"):
+            try:
+                safe_remote_subpath(repo_root, bad_subpath)
+                raise AssertionError("unsafe subpath should fail")
+            except RuntimeError as exc:
+                assert "unsafe remote subpath" in str(exc)
+
+        tree = root / "tree"
+        tree.mkdir()
+        (tree / "SKILL.md").write_text("safe\n", encoding="utf-8")
+        (tree / "notes.md").write_text("safe\n", encoding="utf-8")
+        validate_skill_tree(tree)
+        validate_skill_tree(tree, max_files=10, max_bytes=100)
+        try:
+            validate_skill_tree(tree, max_files=1)
+            raise AssertionError("file count limit should fail")
+        except RuntimeError as exc:
+            assert "too many files" in str(exc)
+        try:
+            validate_skill_tree(tree, max_bytes=1)
+            raise AssertionError("byte limit should fail")
+        except RuntimeError as exc:
+            assert "too large" in str(exc)
+        if hasattr(os, "symlink"):
+            inside_target = tree / "target.md"
+            inside_target.write_text("target\n", encoding="utf-8")
+            (tree / "target-link.md").symlink_to("target.md")
+            validate_skill_tree(tree)
+
+            abs_tree = root / "abs-tree"
+            abs_tree.mkdir()
+            (abs_tree / "SKILL.md").write_text("safe\n", encoding="utf-8")
+            (abs_tree / "abs-link").symlink_to("/tmp")
+            try:
+                validate_skill_tree(abs_tree)
+                raise AssertionError("absolute symlink should fail")
+            except RuntimeError as exc:
+                assert "absolute symlink" in str(exc)
+
+            outside = root / "outside.md"
+            outside.write_text("outside\n", encoding="utf-8")
+            escape_tree = root / "escape-tree"
+            escape_tree.mkdir()
+            (escape_tree / "SKILL.md").write_text("safe\n", encoding="utf-8")
+            (escape_tree / "escape-link").symlink_to("../outside.md")
+            try:
+                validate_skill_tree(escape_tree)
+                raise AssertionError("escaping symlink should fail")
+            except RuntimeError as exc:
+                assert "escapes remote skill" in str(exc)
+
+            broken_tree = root / "broken-tree"
+            broken_tree.mkdir()
+            (broken_tree / "SKILL.md").write_text("safe\n", encoding="utf-8")
+            (broken_tree / "broken-link").symlink_to("missing.md")
+            try:
+                validate_skill_tree(broken_tree)
+                raise AssertionError("broken symlink should fail")
+            except RuntimeError as exc:
+                assert "broken symlink" in str(exc)
 
         if run(["git", "--version"])[0] == 0:
             remote = root / "remote-skill"

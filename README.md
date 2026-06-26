@@ -218,6 +218,9 @@ for the full template.
 - Apply refuses to replace a path outside configured skill roots.
 - Apply refuses to replace symlinked skill installs. Update the symlink source
   repo directly.
+- Remote skill folders are checked before install.
+- Unsafe symlinks, broken symlinks, oversized skill folders, and escaping
+  subpaths are refused.
 - Unknown skills are reported, not overwritten.
 - Local skills marked with `"kind": "local"` are always skipped.
 - The script replaces whole skill folders. Do not use it for skills with local
@@ -297,6 +300,7 @@ skills; update the source repo directly.
 - Plugin updates require the Codex CLI.
 - Source discovery is conservative. Copied monorepo folders usually need a
   manifest.
+- Very large skill folders are refused by default.
 - GitHub `/tree/<branch>/<subpath>` URLs are ambiguous when branch names contain
   `/`; use explicit `branch` and `subpath` manifest fields for those branches.
 

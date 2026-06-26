@@ -144,6 +144,8 @@ For each Needs Setup skill:
 - Never overwrite Needs Setup skills.
 - Do not migrate a skill to a similar repo without confirmation.
 - The script replaces whole skill folders; it does not merge local edits.
+- Unsafe remote skill trees must be reported as failed and never installed.
+- Do not ask the user to override unsafe symlink or size failures.
 - Codex plugin updates are Codex-only.
 
 ## Automation
