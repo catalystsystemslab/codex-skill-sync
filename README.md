@@ -13,6 +13,12 @@ Then run /skill-sync doctor
 
 Nothing will be updated until you approve it.
 
+## Requirements
+
+- Python 3.9+
+- Git
+- Codex CLI only if you want Codex plugin updates
+
 ## What Skill Sync Will Never Do
 
 - It will not update unknown skills.

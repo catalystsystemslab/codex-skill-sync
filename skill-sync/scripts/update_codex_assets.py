@@ -50,6 +50,12 @@ DEFAULT_MANIFESTS = (
     "skill-sources.json",
     "skills-sources.json",
 )
+DEFAULT_SKILL_ROOTS = (
+    "~/.codex/skills",
+    "~/.agents/skills",
+    "~/.claude/skills",
+    "~/.cursor/skills",
+)
 OFFICIAL_GITHUB_OWNERS = {"openai"}
 OFFICIAL_MARKETPLACE_PREFIXES = ("openai-",)
 
@@ -123,12 +129,26 @@ def validate_manifest(manifest: Any) -> str:
         name = item.get("name")
         if path is not None and not isinstance(path, str):
             return f"Manifest problem: skill entry #{index} has a non-string path."
+        for field in ("url", "branch", "subpath", "kind"):
+            if field in item and item[field] is not None and not isinstance(item[field], str):
+                return f"Manifest problem: skill entry #{index} has a non-string `{field}`."
+        if item.get("kind") not in (None, "remote", "local"):
+            return f"Manifest problem: skill entry #{index} has unsupported kind `{item.get('kind')}`."
         if path:
             continue
         if not root or not name:
             return f"Manifest problem: skill entry #{index} needs either `path`, or both `root` and `name`."
         if not isinstance(root, str) or not isinstance(name, str):
             return f"Manifest problem: skill entry #{index} needs string values for `root` and `name`."
+    plugin_fields = ("id", "plugin", "pluginId", "name", "marketplace", "marketplace_id", "marketplaceName")
+    for index, item in enumerate(manifest.get("plugins", []), start=1):
+        if isinstance(item, str):
+            continue
+        if not isinstance(item, dict):
+            return f"Manifest problem: plugin entry #{index} must be a string or object."
+        for field in plugin_fields:
+            if field in item and item[field] is not None and not isinstance(item[field], str):
+                return f"Manifest problem: plugin entry #{index} has a non-string `{field}`."
     return ""
 
 
@@ -177,7 +197,7 @@ def existing_unique_paths(paths: Iterable[Path]) -> List[Path]:
     out: List[Path] = []
     for path in paths:
         key = str(path)
-        if key not in seen and path.exists():
+        if key not in seen and path.is_dir():
             seen.add(key)
             out.append(path)
     return out
@@ -185,29 +205,13 @@ def existing_unique_paths(paths: Iterable[Path]) -> List[Path]:
 
 def default_roots(manifest: Dict[str, Any]) -> List[Path]:
     roots = [expand_path(p) for p in manifest.get("skill_roots", [])]
-    roots.extend(
-        expand_path(p)
-        for p in (
-            "~/.codex/skills",
-            "~/.agents/skills",
-            "~/.claude/skills",
-            "~/.cursor/skills",
-        )
-    )
+    roots.extend(expand_path(p) for p in DEFAULT_SKILL_ROOTS)
     return existing_unique_paths(roots)
 
 
 def configured_roots(manifest: Dict[str, Any], extra_roots: Sequence[str] = ()) -> List[Path]:
     roots = [expand_path(p) for p in manifest.get("skill_roots", [])]
-    roots.extend(
-        expand_path(p)
-        for p in (
-            "~/.codex/skills",
-            "~/.agents/skills",
-            "~/.claude/skills",
-            "~/.cursor/skills",
-        )
-    )
+    roots.extend(expand_path(p) for p in DEFAULT_SKILL_ROOTS)
     roots.extend(expand_path(p) for p in extra_roots)
     seen: set[str] = set()
     out: List[Path] = []
@@ -217,6 +221,31 @@ def configured_roots(manifest: Dict[str, Any], extra_roots: Sequence[str] = ()) 
             seen.add(key)
             out.append(root)
     return out
+
+
+def inspect_skill_roots(roots: Sequence[Path], extra_roots: Sequence[str] = ()) -> List[Dict[str, str]]:
+    explicit = {str(expand_path(path)) for path in extra_roots}
+    checks: List[Dict[str, str]] = []
+    for root in roots:
+        path = display_path(root)
+        is_explicit = str(root) in explicit
+        if not root.exists():
+            checks.append(
+                {
+                    "path": path,
+                    "status": "warn" if is_explicit else "missing",
+                    "detail": "does not exist",
+                }
+            )
+        elif not root.is_dir():
+            checks.append({"path": path, "status": "failed", "detail": "not a directory"})
+        elif not os.access(root, os.R_OK | os.X_OK):
+            checks.append({"path": path, "status": "failed", "detail": "not readable"})
+        elif not os.access(root, os.W_OK):
+            checks.append({"path": path, "status": "warn", "detail": "not writable; apply may fail"})
+        else:
+            checks.append({"path": path, "status": "ok", "detail": "ready"})
+    return checks
 
 
 def codex_cli_available() -> bool:
@@ -235,7 +264,8 @@ def check_status(checks: List[Dict[str, str]]) -> str:
 def doctor_report(manifest_arg: Optional[str], extra_roots: Sequence[str]) -> Dict[str, Any]:
     manifest_result = load_manifest(manifest_arg)
     roots = configured_roots(manifest_result.manifest, extra_roots)
-    existing_roots = [root for root in roots if root.exists()]
+    root_checks = inspect_skill_roots(roots, extra_roots)
+    usable_roots = [root for root, check in zip(roots, root_checks) if check["status"] in {"ok", "warn"} and root.is_dir()]
     checks: List[Dict[str, str]] = []
 
     python_status = "ok" if sys.version_info >= (3, 9) else "failed"
@@ -258,24 +288,35 @@ def doctor_report(manifest_arg: Optional[str], extra_roots: Sequence[str]) -> Di
         }
     )
 
-    if existing_roots:
-        detail = ", ".join(display_path(root) for root in existing_roots[:3])
-        if len(existing_roots) > 3:
-            detail += f", and {len(existing_roots) - 3} more"
-        checks.append({"name": "skill_roots", "status": "ok", "detail": f"found {detail}"})
+    failed_roots = [check for check in root_checks if check["status"] == "failed"]
+    warned_roots = [check for check in root_checks if check["status"] == "warn"]
+    if usable_roots:
+        detail = ", ".join(display_path(root) for root in usable_roots[:3])
+        if len(usable_roots) > 3:
+            detail += f", and {len(usable_roots) - 3} more"
+        status = "failed" if failed_roots else "warn" if warned_roots else "ok"
+        if failed_roots:
+            detail += "; " + "; ".join(f"{check['path']} is {check['detail']}" for check in failed_roots)
+        elif warned_roots:
+            detail += "; " + "; ".join(f"{check['path']} is {check['detail']}" for check in warned_roots)
+        checks.append({"name": "skill_roots", "status": status, "detail": f"found {detail}"})
         checks.append(
             {
                 "name": "installed_skills",
                 "status": "ok",
-                "detail": f"{len(all_skill_dirs(existing_roots))} skills found",
+                "detail": f"{len(all_skill_dirs(usable_roots))} skills found",
             }
         )
     else:
+        status = "failed" if failed_roots else "warn"
+        detail = "no skill roots found yet; install a skill before running updates"
+        if failed_roots:
+            detail = "; ".join(f"{check['path']} is {check['detail']}" for check in failed_roots)
         checks.append(
             {
                 "name": "skill_roots",
-                "status": "warn",
-                "detail": "no skill roots found yet; install a skill before running updates",
+                "status": status,
+                "detail": detail,
             }
         )
 
@@ -399,9 +440,13 @@ def git_branch(path: Path) -> str:
 def discovered_git_sources(roots: Iterable[Path]) -> List[SkillSource]:
     out: List[SkillSource] = []
     for root in roots:
-        if not root.exists():
+        if not root.is_dir():
             continue
-        for child in sorted(root.iterdir()):
+        try:
+            children = sorted(root.iterdir())
+        except OSError:
+            continue
+        for child in children:
             if not child.is_dir():
                 continue
             if not (child / "SKILL.md").exists() or not (child / ".git").exists():
@@ -425,9 +470,13 @@ def discovered_git_sources(roots: Iterable[Path]) -> List[SkillSource]:
 def discovered_skillmd_sources(roots: Iterable[Path]) -> List[SkillSource]:
     out: List[SkillSource] = []
     for root in roots:
-        if not root.exists():
+        if not root.is_dir():
             continue
-        for child in sorted(root.iterdir()):
+        try:
+            children = sorted(root.iterdir())
+        except OSError:
+            continue
+        for child in children:
             skill_md = child / "SKILL.md"
             if not child.is_dir() or not skill_md.exists() or (child / ".git").exists():
                 continue
@@ -458,9 +507,13 @@ def discovered_skillmd_sources(roots: Iterable[Path]) -> List[SkillSource]:
 def all_skill_dirs(roots: Iterable[Path]) -> List[Path]:
     out: List[Path] = []
     for root in roots:
-        if not root.exists():
+        if not root.is_dir():
             continue
-        for child in sorted(root.iterdir()):
+        try:
+            children = sorted(root.iterdir())
+        except OSError:
+            continue
+        for child in children:
             if child.is_dir() and (child / "SKILL.md").exists():
                 out.append(child)
     return out
@@ -946,9 +999,13 @@ def render_inventory_text(records: List[Dict[str, Any]]) -> str:
         "unmapped": "Needs Setup",
     }
     lines: List[str] = []
+    skipped_plugins = [
+        item for item in records if item.get("type", "").startswith("plugin") and item.get("status") == "skipped"
+    ]
+    grouped_records = [item for item in records if item not in skipped_plugins]
     for group in ("official", "non_official", "unmapped"):
         lines.append(labels[group] + ":")
-        items = [item for item in records if item.get("group") == group]
+        items = [item for item in grouped_records if item.get("group") == group]
         if not items:
             lines.append("- none")
             continue
@@ -957,7 +1014,12 @@ def render_inventory_text(records: List[Dict[str, Any]]) -> str:
             detail = item.get("reason") or item.get("error") or ""
             suffix = f" - {detail}" if detail else ""
             lines.append(f"- {item['type']}: {item['name']}{repo}{suffix}")
-    counts = inventory_summary(records)
+    if skipped_plugins:
+        lines.append("Plugins:")
+        for item in skipped_plugins:
+            detail = item.get("reason") or item.get("error") or ""
+            lines.append(f"- skipped: {detail}")
+    counts = inventory_summary(grouped_records)
     lines.extend(
         [
             "",
@@ -1002,6 +1064,20 @@ def manifest_failure_record(manifest_result: ManifestResult) -> Dict[str, Any]:
         "status": "failed",
         "error": manifest_result.error + " No skills were updated.",
     }
+
+
+def render_manifest_failure_text(record: Dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            f"failed: {record['name']} - {record['error']}",
+            "",
+            "No changes were made.",
+            "Summary:",
+            "- 1 item failed",
+            "Recommended next step:",
+            "Fix the manifest, then run /skill-sync doctor again.",
+        ]
+    )
 
 
 def self_test() -> None:
@@ -1055,6 +1131,15 @@ def self_test() -> None:
         assert existing_unique_paths([source_root, source_root]) == [source_root]
         assert validate_manifest({"skills": [{"name": "x"}]}).startswith("Manifest problem")
         assert validate_manifest({"skill_roots": "~/.codex/skills"}).startswith("Manifest problem")
+        for field in ("url", "branch", "subpath", "kind"):
+            assert f"`{field}`" in validate_manifest(
+                {"skills": [{"name": "demo", "root": str(source_root), field: 123}]}
+            )
+        assert "unsupported kind" in validate_manifest(
+            {"skills": [{"name": "demo", "root": str(source_root), "kind": "generated"}]}
+        )
+        assert "plugin entry #1" in validate_manifest({"plugins": [123]})
+        assert "`id`" in validate_manifest({"plugins": [{"id": 123}]})
         missing_manifest = load_manifest(str(root / "missing.json"))
         assert missing_manifest.error.startswith("Manifest problem")
         bad_manifest = root / "bad.json"
@@ -1070,10 +1155,22 @@ def self_test() -> None:
         assert doctor["status"] in {"ok", "warn"}
         assert {check["name"] for check in doctor["checks"]} >= {"python_version", "git", "manifest", "changes"}
         assert doctor_report(str(bad_manifest), [])["status"] == "failed"
+        root_file = root / "not-a-root"
+        root_file.write_text("file\n", encoding="utf-8")
+        assert inspect_skill_roots([root_file])[0]["status"] == "failed"
+        assert doctor_report(str(good_manifest), [str(root_file)])["status"] == "failed"
         assert plugin_inventory({}, require_codex=False, codex_available=False)[0]["status"] == "skipped"
         assert plugin_inventory({}, require_codex=True, codex_available=False)[0]["status"] == "failed"
         assert update_plugins({}, apply=True, require_codex=False, codex_available=False)[0]["status"] == "skipped"
         assert update_plugins({}, apply=True, require_codex=True, codex_available=False)[0]["status"] == "failed"
+        bad_manifest_result = load_manifest(str(bad_manifest))
+        failure_text = render_manifest_failure_text(manifest_failure_record(bad_manifest_result))
+        assert "run /skill-sync doctor again" in failure_text
+        assert "run /skill-sync check" not in failure_text
+        plugin_text = render_inventory_text([codex_missing_record(False)])
+        assert "Plugins:" in plugin_text
+        assert "- 0 needs setup" in plugin_text
+        assert "Codex plugins" not in plugin_text.split("Needs Setup:", 1)[1].split("Plugins:", 1)[0]
 
         if run(["git", "--version"])[0] == 0:
             remote = root / "remote-skill"
@@ -1153,7 +1250,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if manifest_result.error:
         record = manifest_failure_record(manifest_result)
         if args.inventory:
-            report = {"summary": inventory_summary([record]), "inventory": [record]}
+            report = {"summary": {"failed": 1}, "inventory": [record]}
             if args.report:
                 report_path = expand_path(args.report)
                 report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1161,7 +1258,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if args.json:
                 print(json.dumps(report, indent=2, sort_keys=True))
             else:
-                print(render_inventory_text([record]))
+                print(render_manifest_failure_text(record))
             return 1
         report = {"summary": {"failed": 1}, "results": [record]}
         if args.report:
@@ -1171,7 +1268,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.json:
             print(json.dumps(report, indent=2, sort_keys=True))
         else:
-            print(render_text([record]))
+            print(render_manifest_failure_text(record))
         return 1
 
     manifest = manifest_result.manifest
