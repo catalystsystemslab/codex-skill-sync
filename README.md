@@ -109,6 +109,41 @@ What happens:
 5. `check` stops at dry-run; `update` and `run all` ask for confirmation before applying.
 6. After a successful update, it can help create a weekly check automation.
 
+## What You Will See
+
+`/skill-sync doctor`:
+
+```text
+Skill Sync Doctor
+OK: Python - 3.11.8 supported
+OK: Git - found
+Recommended next step:
+Run /skill-sync check.
+```
+
+`/skill-sync check`:
+
+```text
+Skill Sync Check
+No changes were made. This was a preview.
+Skills with updates available:
+- my-skill
+Recommended next step:
+Run /skill-sync update if you want to apply the available skill updates.
+```
+
+`/skill-sync update`:
+
+```text
+Skill Sync Update
+Changes were made.
+Updated skills:
+- my-skill
+  Backup: ~/.codex/skills/.skill-sync-backups/my-skill-...
+Recommended next step:
+Run /skill-sync check to verify everything is current.
+```
+
 ## Advanced: Direct CLI Use
 
 Run the inventory directly:

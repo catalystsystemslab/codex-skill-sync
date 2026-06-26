@@ -963,74 +963,88 @@ def summarize(results: List[Dict[str, Any]]) -> Dict[str, int]:
     return counts
 
 
-def plural(count: int, singular: str, plural_value: Optional[str] = None) -> str:
-    return singular if count == 1 else (plural_value or singular + "s")
+def skill_display_name(item: Dict[str, Any]) -> str:
+    return str(item.get("name") or item.get("path") or "unknown")
 
 
-def render_result_summary(results: List[Dict[str, Any]]) -> List[str]:
+def skip_reason(item: Dict[str, Any]) -> str:
+    reason = item.get("reason") or item.get("error") or "skipped"
+    if reason == "local":
+        return "marked local"
+    if reason == "dry-run":
+        return "dry-run"
+    if "unknown source" in reason:
+        return "source is unknown, so it was not checked"
+    if reason == "no remote url":
+        return "source is unknown, so it was not checked"
+    return str(reason)
+
+
+def append_section(lines: List[str], title: str, items: Sequence[Dict[str, Any]], backups: bool = False) -> None:
+    if not items:
+        return
+    lines.append(title + ":")
+    for item in items:
+        lines.append(f"- {skill_display_name(item)}")
+        if backups and item.get("backup"):
+            lines.append(f"  Backup: {item['backup']}")
+
+
+def render_text(results: List[Dict[str, Any]]) -> str:
     changed = any(item.get("status") == "updated" for item in results)
-    skill_current = sum(1 for item in results if item.get("type") == "skill" and item.get("status") == "current")
-    skill_updates = sum(
-        1 for item in results if item.get("type") == "skill" and item.get("status") == "update_available"
-    )
-    skill_updated = sum(1 for item in results if item.get("type") == "skill" and item.get("status") == "updated")
-    skill_setup = sum(
-        1
-        for item in results
-        if item.get("type") == "skill"
-        and item.get("status") == "skipped"
+    title = "Skill Sync Update" if changed else "Skill Sync Check"
+    skills = [item for item in results if item.get("type") == "skill"]
+    plugins = [item for item in results if item.get("type", "").startswith("plugin")]
+    updated = [item for item in skills if item.get("status") == "updated"]
+    updates = [item for item in skills if item.get("status") == "update_available"]
+    current = [item for item in skills if item.get("status") == "current"]
+    needs_setup = [
+        item
+        for item in skills
+        if item.get("status") == "skipped"
         and any(text in item.get("reason", "") for text in ("unknown source", "no remote url", "placeholder"))
-    )
-    skill_skipped = sum(
-        1
-        for item in results
-        if item.get("type") == "skill" and item.get("status") == "skipped"
-    ) - skill_setup
-    failed = sum(1 for item in results if item.get("status") == "failed")
-    plugin_skipped = [item for item in results if item.get("type", "").startswith("plugin") and item.get("status") == "skipped"]
+    ]
+    skipped = [item for item in skills if item.get("status") == "skipped" and item not in needs_setup]
+    failed = [item for item in results if item.get("status") == "failed"]
 
-    lines = ["Changes were made." if changed else "No changes were made.", "Summary:"]
-    if skill_current:
-        lines.append(f"- {skill_current} {plural(skill_current, 'skill')} current")
-    if skill_updates:
-        lines.append(f"- {skill_updates} {plural(skill_updates, 'skill')} with updates available")
-    if skill_updated:
-        lines.append(f"- {skill_updated} {plural(skill_updated, 'skill')} updated")
-    if skill_setup:
-        lines.append(f"- {skill_setup} {plural(skill_setup, 'skill')} needs setup")
-    if skill_skipped:
-        lines.append(f"- {skill_skipped} {plural(skill_skipped, 'skill')} skipped")
-    if plugin_skipped:
-        reason = plugin_skipped[0].get("reason", "not requested")
-        lines.append(f"- Codex plugins skipped: {reason}")
+    lines = [title, "Changes were made." if changed else "No changes were made."]
+    if updates and not changed:
+        lines[-1] += " This was a preview."
+
+    append_section(lines, "Updated skills", updated, backups=True)
+    append_section(lines, "Skills with updates available", updates)
+    append_section(lines, "Already current", current)
+    if needs_setup:
+        lines.append("Needs setup:")
+        for item in needs_setup:
+            lines.append(f"- {skill_display_name(item)}: {skip_reason(item)}")
+    if skipped:
+        lines.append("Skipped:")
+        for item in skipped:
+            lines.append(f"- {skill_display_name(item)}: {skip_reason(item)}")
     if failed:
-        lines.append(f"- {failed} {plural(failed, 'item')} failed")
-    if len(lines) == 2:
-        lines.append("- Nothing to report")
+        lines.append("Failed:")
+        for item in failed:
+            label = skill_display_name(item)
+            detail = item.get("error") or item.get("reason") or "failed"
+            lines.append(f"- {label}: {detail}")
+    if plugins:
+        lines.append("Codex plugins:")
+        for item in plugins:
+            detail = item.get("reason") or item.get("error") or item.get("status", "checked")
+            lines.append(f"- {item.get('status', 'unknown')}: {detail}")
 
     lines.append("Recommended next step:")
     if failed:
-        lines.append("Fix the failed items, then run /skill-sync check again.")
-    elif skill_updates:
+        lines.append("Fix the failed items, then run /skill-sync doctor again.")
+    elif updates:
         lines.append("Run /skill-sync update if you want to apply the available skill updates.")
-    elif skill_setup:
+    elif needs_setup:
         lines.append("Map the Needs Setup skills, or leave them skipped.")
     elif changed:
         lines.append("Run /skill-sync check to verify everything is current.")
     else:
         lines.append("No action needed.")
-    return lines
-
-
-def render_text(results: List[Dict[str, Any]]) -> str:
-    lines = []
-    for item in results:
-        label = item.get("name") or item.get("path") or item.get("type")
-        detail = item.get("reason") or item.get("error") or item.get("backup") or ""
-        suffix = f" - {detail}" if detail else ""
-        lines.append(f"{item.get('status', 'unknown')}: {label}{suffix}")
-    lines.append("")
-    lines.extend(render_result_summary(results))
     return "\n".join(lines)
 
 
@@ -1070,6 +1084,14 @@ def render_inventory_text(records: List[Dict[str, Any]]) -> str:
             detail = item.get("reason") or item.get("error") or ""
             lines.append(f"- skipped: {detail}")
     counts = inventory_summary(grouped_records)
+    failed = sum(1 for item in grouped_records if item.get("status") == "failed")
+    needs_setup = counts.get("unmapped", 0)
+    if failed:
+        next_step = "Fix the failed items, then run /skill-sync doctor again."
+    elif needs_setup:
+        next_step = "Map the Needs Setup skills, or leave them skipped."
+    else:
+        next_step = "Run /skill-sync check to preview updates."
     lines.extend(
         [
             "",
@@ -1077,9 +1099,9 @@ def render_inventory_text(records: List[Dict[str, Any]]) -> str:
             "Summary:",
             f"- {counts.get('official', 0)} official",
             f"- {counts.get('non_official', 0)} community",
-            f"- {counts.get('unmapped', 0)} needs setup",
+            f"- {needs_setup} needs setup",
             "Recommended next step:",
-            "Run /skill-sync check to preview updates.",
+            next_step,
         ]
     )
     return "\n".join(lines)
@@ -1101,6 +1123,13 @@ def render_doctor_text(report: Dict[str, Any]) -> str:
     for check in report["checks"]:
         name = names.get(check["name"], check["name"])
         lines.append(f"{labels.get(check['status'], check['status'].upper())}: {name} - {check['detail']}")
+    lines.append("Recommended next step:")
+    if report["status"] == "failed":
+        lines.append("Fix the failed checks, then run /skill-sync doctor again.")
+    elif report["status"] == "warn":
+        lines.append("You can run /skill-sync check. Review warnings before applying updates.")
+    else:
+        lines.append("Run /skill-sync check.")
     return "\n".join(lines)
 
 
@@ -1221,6 +1250,54 @@ def self_test() -> None:
         assert "Plugins:" in plugin_text
         assert "- 0 needs setup" in plugin_text
         assert "Codex plugins" not in plugin_text.split("Needs Setup:", 1)[1].split("Plugins:", 1)[0]
+        dry_text = render_text(
+            [
+                {"type": "skill", "name": "my-skill", "status": "update_available"},
+                {"type": "skill", "name": "current-skill", "status": "current"},
+                {"type": "plugin", "status": "skipped", "reason": "dry-run"},
+            ]
+        )
+        assert "Skill Sync Check" in dry_text
+        assert "Skills with updates available:" in dry_text
+        assert "Codex plugins:" in dry_text
+        assert "update_available:" not in dry_text
+        update_text = render_text(
+            [
+                {
+                    "type": "skill",
+                    "name": "my-skill",
+                    "status": "updated",
+                    "backup": "~/.codex/skills/.skill-sync-backups/my-skill-1",
+                }
+            ]
+        )
+        assert "Skill Sync Update" in update_text
+        assert "Updated skills:" in update_text
+        assert "Backup: ~/.codex/skills/.skill-sync-backups/my-skill-1" in update_text
+        failed_text = render_text(
+            [
+                {
+                    "type": "skill",
+                    "name": "my-skill",
+                    "status": "failed",
+                    "error": "unsafe symlink escapes remote skill: data -> ../../private",
+                }
+            ]
+        )
+        assert "Failed:" in failed_text
+        assert "run /skill-sync doctor again" in failed_text
+        inventory_setup = render_inventory_text(
+            [{"type": "skill", "name": "needs-map", "group": "unmapped", "repo": ""}]
+        )
+        assert "Map the Needs Setup skills" in inventory_setup
+        inventory_ready = render_inventory_text(
+            [{"type": "skill", "name": "ready", "group": "official", "repo": "https://github.com/openai/demo"}]
+        )
+        assert "Run /skill-sync check to preview updates." in inventory_ready
+        doctor_warn = render_doctor_text({"status": "warn", "checks": [{"name": "git", "status": "ok", "detail": "found"}]})
+        assert "Review warnings before applying updates" in doctor_warn
+        json_report = {"summary": summarize([{"status": "current"}]), "results": [{"status": "current"}]}
+        assert json_report == {"summary": {"current": 1}, "results": [{"status": "current"}]}
 
         repo_root = root / "repo-root"
         repo_root.mkdir()
