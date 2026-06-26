@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -64,8 +65,23 @@ class SkillSource:
     source: str = "manifest"
 
 
+@dataclasses.dataclass
+class ManifestResult:
+    manifest: Dict[str, Any]
+    path: str = ""
+    error: str = ""
+    present: bool = False
+
+
 def expand_path(value: str) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(value))).resolve()
+
+
+def display_path(path: Path) -> str:
+    try:
+        return "~/" + path.relative_to(Path.home()).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def run(cmd: Sequence[str], cwd: Optional[Path] = None, timeout: int = 120) -> Tuple[int, str, str]:
@@ -90,7 +106,33 @@ def run(cmd: Sequence[str], cwd: Optional[Path] = None, timeout: int = 120) -> T
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
-def load_manifest(path: Optional[str]) -> Dict[str, Any]:
+def validate_manifest(manifest: Any) -> str:
+    if not isinstance(manifest, dict):
+        return "Manifest problem: the top level must be a JSON object."
+    for key in ("skill_roots", "skills", "plugins"):
+        if key in manifest and not isinstance(manifest[key], list):
+            return f"Manifest problem: `{key}` must be a list."
+    for index, root in enumerate(manifest.get("skill_roots", []), start=1):
+        if not isinstance(root, str) or not root:
+            return f"Manifest problem: skill_roots entry #{index} must be a non-empty string."
+    for index, item in enumerate(manifest.get("skills", []), start=1):
+        if not isinstance(item, dict):
+            return f"Manifest problem: skill entry #{index} must be an object."
+        path = item.get("path")
+        root = item.get("root")
+        name = item.get("name")
+        if path is not None and not isinstance(path, str):
+            return f"Manifest problem: skill entry #{index} has a non-string path."
+        if path:
+            continue
+        if not root or not name:
+            return f"Manifest problem: skill entry #{index} needs either `path`, or both `root` and `name`."
+        if not isinstance(root, str) or not isinstance(name, str):
+            return f"Manifest problem: skill entry #{index} needs string values for `root` and `name`."
+    return ""
+
+
+def load_manifest(path: Optional[str]) -> ManifestResult:
     if not path:
         for candidate in DEFAULT_MANIFESTS:
             p = expand_path(candidate) if candidate.startswith("~") else Path(candidate)
@@ -98,9 +140,36 @@ def load_manifest(path: Optional[str]) -> Dict[str, Any]:
                 path = str(p)
                 break
     if not path:
-        return {}
-    with open(expand_path(path), "r", encoding="utf-8") as fh:
-        return json.load(fh)
+        return ManifestResult({})
+    manifest_path = expand_path(path)
+    if not manifest_path.exists():
+        return ManifestResult(
+            {},
+            str(manifest_path),
+            f"Manifest problem: {display_path(manifest_path)} does not exist.",
+            True,
+        )
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except json.JSONDecodeError as exc:
+        return ManifestResult(
+            {},
+            str(manifest_path),
+            f"Manifest problem: {display_path(manifest_path)} is not valid JSON at line {exc.lineno}.",
+            True,
+        )
+    except OSError as exc:
+        return ManifestResult(
+            {},
+            str(manifest_path),
+            f"Manifest problem: could not read {display_path(manifest_path)}: {exc}.",
+            True,
+        )
+    error = validate_manifest(manifest)
+    if error:
+        return ManifestResult({}, str(manifest_path), error, True)
+    return ManifestResult(manifest, str(manifest_path), "", True)
 
 
 def existing_unique_paths(paths: Iterable[Path]) -> List[Path]:
@@ -126,6 +195,126 @@ def default_roots(manifest: Dict[str, Any]) -> List[Path]:
         )
     )
     return existing_unique_paths(roots)
+
+
+def configured_roots(manifest: Dict[str, Any], extra_roots: Sequence[str] = ()) -> List[Path]:
+    roots = [expand_path(p) for p in manifest.get("skill_roots", [])]
+    roots.extend(
+        expand_path(p)
+        for p in (
+            "~/.codex/skills",
+            "~/.agents/skills",
+            "~/.claude/skills",
+            "~/.cursor/skills",
+        )
+    )
+    roots.extend(expand_path(p) for p in extra_roots)
+    seen: set[str] = set()
+    out: List[Path] = []
+    for root in roots:
+        key = str(root)
+        if key not in seen:
+            seen.add(key)
+            out.append(root)
+    return out
+
+
+def codex_cli_available() -> bool:
+    return shutil.which("codex") is not None
+
+
+def check_status(checks: List[Dict[str, str]]) -> str:
+    statuses = {check["status"] for check in checks}
+    if "failed" in statuses:
+        return "failed"
+    if "warn" in statuses:
+        return "warn"
+    return "ok"
+
+
+def doctor_report(manifest_arg: Optional[str], extra_roots: Sequence[str]) -> Dict[str, Any]:
+    manifest_result = load_manifest(manifest_arg)
+    roots = configured_roots(manifest_result.manifest, extra_roots)
+    existing_roots = [root for root in roots if root.exists()]
+    checks: List[Dict[str, str]] = []
+
+    python_status = "ok" if sys.version_info >= (3, 9) else "failed"
+    checks.append(
+        {
+            "name": "python_version",
+            "status": python_status,
+            "detail": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} supported"
+            if python_status == "ok"
+            else f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}; Python 3.9+ is required",
+        }
+    )
+
+    git_path = shutil.which("git")
+    checks.append(
+        {
+            "name": "git",
+            "status": "ok" if git_path else "failed",
+            "detail": "found" if git_path else "not found; install Git before checking remote skills",
+        }
+    )
+
+    if existing_roots:
+        detail = ", ".join(display_path(root) for root in existing_roots[:3])
+        if len(existing_roots) > 3:
+            detail += f", and {len(existing_roots) - 3} more"
+        checks.append({"name": "skill_roots", "status": "ok", "detail": f"found {detail}"})
+        checks.append(
+            {
+                "name": "installed_skills",
+                "status": "ok",
+                "detail": f"{len(all_skill_dirs(existing_roots))} skills found",
+            }
+        )
+    else:
+        checks.append(
+            {
+                "name": "skill_roots",
+                "status": "warn",
+                "detail": "no skill roots found yet; install a skill before running updates",
+            }
+        )
+
+    if manifest_result.error:
+        checks.append({"name": "manifest", "status": "failed", "detail": manifest_result.error})
+    elif manifest_result.present:
+        checks.append(
+            {
+                "name": "manifest",
+                "status": "ok",
+                "detail": f"loaded from {display_path(Path(manifest_result.path))}",
+            }
+        )
+    else:
+        checks.append(
+            {
+                "name": "manifest",
+                "status": "ok",
+                "detail": "no manifest found; unknown skills will stay skipped",
+            }
+        )
+
+    codex_found = codex_cli_available()
+    checks.append(
+        {
+            "name": "codex_cli",
+            "status": "ok" if codex_found else "warn",
+            "detail": "found" if codex_found else "not found; plugin updates are unavailable",
+        }
+    )
+    checks.append(
+        {
+            "name": "plugin_support",
+            "status": "ok" if codex_found else "warn",
+            "detail": "plugins available" if codex_found else "plugins unavailable; skill updates can still run",
+        }
+    )
+    checks.append({"name": "changes", "status": "ok", "detail": "no changes were made"})
+    return {"status": check_status(checks), "checks": checks}
 
 
 def parse_github_url(url: str) -> Tuple[str, str, str]:
@@ -562,7 +751,32 @@ def plugin_inventory_records(plugins: List[Dict[str, str]], source: str) -> List
     return records
 
 
-def plugin_inventory(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
+def codex_missing_record(failed: bool) -> Dict[str, Any]:
+    reason = (
+        "Codex CLI not found; plugin updates require Codex."
+        if failed
+        else "Codex CLI not found; plugin updates skipped. Skill updates can still run."
+    )
+    return {
+        "type": "plugin",
+        "name": "Codex plugins",
+        "group": "unmapped",
+        "repo": "",
+        "source": "codex",
+        "status": "failed" if failed else "skipped",
+        "reason": reason,
+    }
+
+
+def plugin_inventory(
+    manifest: Dict[str, Any],
+    require_codex: bool = False,
+    codex_available: Optional[bool] = None,
+) -> List[Dict[str, Any]]:
+    if codex_available is None:
+        codex_available = codex_cli_available()
+    if not codex_available:
+        return [codex_missing_record(require_codex)]
     plugins, err = installed_plugins()
     source = "codex"
     if err:
@@ -583,7 +797,16 @@ def plugin_inventory(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
     return plugin_inventory_records(plugins, source)
 
 
-def update_plugins(manifest: Dict[str, Any], apply: bool) -> List[Dict[str, Any]]:
+def update_plugins(
+    manifest: Dict[str, Any],
+    apply: bool,
+    require_codex: bool = False,
+    codex_available: Optional[bool] = None,
+) -> List[Dict[str, Any]]:
+    if codex_available is None:
+        codex_available = codex_cli_available()
+    if not codex_available:
+        return [codex_missing_record(require_codex)]
     if not apply:
         return [{"type": "plugin", "status": "skipped", "reason": "dry-run"}]
 
@@ -637,6 +860,65 @@ def summarize(results: List[Dict[str, Any]]) -> Dict[str, int]:
     return counts
 
 
+def plural(count: int, singular: str, plural_value: Optional[str] = None) -> str:
+    return singular if count == 1 else (plural_value or singular + "s")
+
+
+def render_result_summary(results: List[Dict[str, Any]]) -> List[str]:
+    changed = any(item.get("status") == "updated" for item in results)
+    skill_current = sum(1 for item in results if item.get("type") == "skill" and item.get("status") == "current")
+    skill_updates = sum(
+        1 for item in results if item.get("type") == "skill" and item.get("status") == "update_available"
+    )
+    skill_updated = sum(1 for item in results if item.get("type") == "skill" and item.get("status") == "updated")
+    skill_setup = sum(
+        1
+        for item in results
+        if item.get("type") == "skill"
+        and item.get("status") == "skipped"
+        and any(text in item.get("reason", "") for text in ("unknown source", "no remote url", "placeholder"))
+    )
+    skill_skipped = sum(
+        1
+        for item in results
+        if item.get("type") == "skill" and item.get("status") == "skipped"
+    ) - skill_setup
+    failed = sum(1 for item in results if item.get("status") == "failed")
+    plugin_skipped = [item for item in results if item.get("type", "").startswith("plugin") and item.get("status") == "skipped"]
+
+    lines = ["Changes were made." if changed else "No changes were made.", "Summary:"]
+    if skill_current:
+        lines.append(f"- {skill_current} {plural(skill_current, 'skill')} current")
+    if skill_updates:
+        lines.append(f"- {skill_updates} {plural(skill_updates, 'skill')} with updates available")
+    if skill_updated:
+        lines.append(f"- {skill_updated} {plural(skill_updated, 'skill')} updated")
+    if skill_setup:
+        lines.append(f"- {skill_setup} {plural(skill_setup, 'skill')} needs setup")
+    if skill_skipped:
+        lines.append(f"- {skill_skipped} {plural(skill_skipped, 'skill')} skipped")
+    if plugin_skipped:
+        reason = plugin_skipped[0].get("reason", "not requested")
+        lines.append(f"- Codex plugins skipped: {reason}")
+    if failed:
+        lines.append(f"- {failed} {plural(failed, 'item')} failed")
+    if len(lines) == 2:
+        lines.append("- Nothing to report")
+
+    lines.append("Recommended next step:")
+    if failed:
+        lines.append("Fix the failed items, then run /skill-sync check again.")
+    elif skill_updates:
+        lines.append("Run /skill-sync update if you want to apply the available skill updates.")
+    elif skill_setup:
+        lines.append("Map the Needs Setup skills, or leave them skipped.")
+    elif changed:
+        lines.append("Run /skill-sync check to verify everything is current.")
+    else:
+        lines.append("No action needed.")
+    return lines
+
+
 def render_text(results: List[Dict[str, Any]]) -> str:
     lines = []
     for item in results:
@@ -644,7 +926,8 @@ def render_text(results: List[Dict[str, Any]]) -> str:
         detail = item.get("reason") or item.get("error") or item.get("backup") or ""
         suffix = f" - {detail}" if detail else ""
         lines.append(f"{item.get('status', 'unknown')}: {label}{suffix}")
-    lines.append("summary: " + json.dumps(summarize(results), sort_keys=True))
+    lines.append("")
+    lines.extend(render_result_summary(results))
     return "\n".join(lines)
 
 
@@ -659,8 +942,8 @@ def inventory_summary(records: List[Dict[str, Any]]) -> Dict[str, int]:
 def render_inventory_text(records: List[Dict[str, Any]]) -> str:
     labels = {
         "official": "Official",
-        "non_official": "Non Official",
-        "unmapped": "Not Mapped",
+        "non_official": "Community",
+        "unmapped": "Needs Setup",
     }
     lines: List[str] = []
     for group in ("official", "non_official", "unmapped"):
@@ -671,9 +954,54 @@ def render_inventory_text(records: List[Dict[str, Any]]) -> str:
             continue
         for item in items:
             repo = f" - {item['repo']}" if item.get("repo") else ""
-            lines.append(f"- {item['type']}: {item['name']}{repo}")
-    lines.append("summary: " + json.dumps(inventory_summary(records), sort_keys=True))
+            detail = item.get("reason") or item.get("error") or ""
+            suffix = f" - {detail}" if detail else ""
+            lines.append(f"- {item['type']}: {item['name']}{repo}{suffix}")
+    counts = inventory_summary(records)
+    lines.extend(
+        [
+            "",
+            "No changes were made.",
+            "Summary:",
+            f"- {counts.get('official', 0)} official",
+            f"- {counts.get('non_official', 0)} community",
+            f"- {counts.get('unmapped', 0)} needs setup",
+            "Recommended next step:",
+            "Run /skill-sync check to preview updates.",
+        ]
+    )
     return "\n".join(lines)
+
+
+def render_doctor_text(report: Dict[str, Any]) -> str:
+    lines = ["Skill Sync Doctor"]
+    labels = {"ok": "OK", "warn": "WARN", "failed": "FAILED"}
+    names = {
+        "python_version": "Python",
+        "git": "Git",
+        "skill_roots": "Skill roots",
+        "installed_skills": "Installed skills",
+        "manifest": "Manifest",
+        "codex_cli": "Codex CLI",
+        "plugin_support": "Plugin support",
+        "changes": "Changes",
+    }
+    for check in report["checks"]:
+        name = names.get(check["name"], check["name"])
+        lines.append(f"{labels.get(check['status'], check['status'].upper())}: {name} - {check['detail']}")
+    return "\n".join(lines)
+
+
+def manifest_failure_record(manifest_result: ManifestResult) -> Dict[str, Any]:
+    return {
+        "type": "manifest",
+        "name": display_path(Path(manifest_result.path)) if manifest_result.path else "manifest",
+        "group": "unmapped",
+        "repo": "",
+        "source": "manifest",
+        "status": "failed",
+        "error": manifest_result.error + " No skills were updated.",
+    }
 
 
 def self_test() -> None:
@@ -725,6 +1053,27 @@ def self_test() -> None:
             {"installed": [{"pluginId": "linear@openai-curated", "installed": False}]}
         ) == []
         assert existing_unique_paths([source_root, source_root]) == [source_root]
+        assert validate_manifest({"skills": [{"name": "x"}]}).startswith("Manifest problem")
+        assert validate_manifest({"skill_roots": "~/.codex/skills"}).startswith("Manifest problem")
+        missing_manifest = load_manifest(str(root / "missing.json"))
+        assert missing_manifest.error.startswith("Manifest problem")
+        bad_manifest = root / "bad.json"
+        bad_manifest.write_text("{bad json", encoding="utf-8")
+        assert "not valid JSON" in load_manifest(str(bad_manifest)).error
+        good_manifest = root / "good.json"
+        good_manifest.write_text(
+            json.dumps({"skills": [{"name": "demo", "root": str(source_root), "kind": "local"}]}),
+            encoding="utf-8",
+        )
+        assert load_manifest(str(good_manifest)).manifest["skills"][0]["name"] == "demo"
+        doctor = doctor_report(str(good_manifest), [])
+        assert doctor["status"] in {"ok", "warn"}
+        assert {check["name"] for check in doctor["checks"]} >= {"python_version", "git", "manifest", "changes"}
+        assert doctor_report(str(bad_manifest), [])["status"] == "failed"
+        assert plugin_inventory({}, require_codex=False, codex_available=False)[0]["status"] == "skipped"
+        assert plugin_inventory({}, require_codex=True, codex_available=False)[0]["status"] == "failed"
+        assert update_plugins({}, apply=True, require_codex=False, codex_available=False)[0]["status"] == "skipped"
+        assert update_plugins({}, apply=True, require_codex=True, codex_available=False)[0]["status"] == "failed"
 
         if run(["git", "--version"])[0] == 0:
             remote = root / "remote-skill"
@@ -774,6 +1123,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--skill-root", action="append", default=[], help="Extra skill root to scan")
     parser.add_argument("--apply", action="store_true", help="Apply updates. Default is dry-run.")
     parser.add_argument("--inventory", action="store_true", help="List skills/plugins by mapping group")
+    parser.add_argument("--doctor", action="store_true", help="Run read-only beginner-safe diagnostics")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     plugin_scope = parser.add_mutually_exclusive_group()
     plugin_scope.add_argument("--no-plugins", action="store_true", help="Do not refresh Codex plugins")
@@ -787,7 +1137,44 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("self-test ok")
         return 0
 
-    manifest = load_manifest(args.manifest)
+    if args.doctor:
+        report = doctor_report(args.manifest, args.skill_root)
+        if args.report:
+            report_path = expand_path(args.report)
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            print(render_doctor_text(report))
+        return 1 if report["status"] == "failed" else 0
+
+    manifest_result = load_manifest(args.manifest)
+    if manifest_result.error:
+        record = manifest_failure_record(manifest_result)
+        if args.inventory:
+            report = {"summary": inventory_summary([record]), "inventory": [record]}
+            if args.report:
+                report_path = expand_path(args.report)
+                report_path.parent.mkdir(parents=True, exist_ok=True)
+                report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            if args.json:
+                print(json.dumps(report, indent=2, sort_keys=True))
+            else:
+                print(render_inventory_text([record]))
+            return 1
+        report = {"summary": {"failed": 1}, "results": [record]}
+        if args.report:
+            report_path = expand_path(args.report)
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            print(render_text([record]))
+        return 1
+
+    manifest = manifest_result.manifest
     roots = default_roots(manifest)
     roots.extend(expand_path(p) for p in args.skill_root)
     roots = existing_unique_paths(roots)
@@ -797,7 +1184,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not args.plugins_only:
             records.extend(skill_inventory(manifest, roots))
         if not args.no_plugins:
-            records.extend(plugin_inventory(manifest))
+            records.extend(plugin_inventory(manifest, require_codex=args.plugins_only))
         report = {"summary": inventory_summary(records), "inventory": records}
         if args.report:
             report_path = expand_path(args.report)
@@ -828,7 +1215,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
 
     if not args.no_plugins:
-        results.extend(update_plugins(manifest, args.apply))
+        results.extend(update_plugins(manifest, args.apply, require_codex=args.plugins_only))
 
     report = {"summary": summarize(results), "results": results}
     if args.report:

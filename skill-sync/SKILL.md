@@ -5,31 +5,70 @@ description: Simple sync flow for installed SKILL.md skills and Codex plugins. U
 
 # Skill Sync
 
-Keep installed skills and Codex plugins current. `check`, `update`, and
-`run all` all start the same inventory and mapping flow.
+Source: https://github.com/catalystsystemslab/codex-skill-sync/tree/main/skill-sync
+
+Keep installed skills and Codex plugins current. `doctor` is read-only setup
+diagnostics. `check`, `update`, and `run all` all start the same inventory and
+mapping flow.
 
 ## Start Here
 
-First list what is installed, no matter which command the user chose:
+For `check`, `update`, and `run all`, first list what is installed:
 
 ```bash
 python3 <skill-dir>/scripts/update_codex_assets.py --inventory --json --report skill-update-report.json
 ```
 
-Show the result as three groups:
+Show the result as three groups. Translate internal JSON groups this way:
 
-- Official
-- Non Official
-- Not Mapped
+- `official` -> Official
+- `non_official` -> Community
+- `unmapped` -> Needs Setup
 
 Blank repo means the source is not confirmed. Do not guess.
 
+## Beginner Response Style
+
+Most users do not know Git, JSON, branches, or subpaths.
+
+When showing inventory:
+
+- Explain each group in plain language.
+- Do not show raw JSON unless the user asks.
+- Recommend the safest next action.
+- Ask one decision at a time.
+
+When mapping:
+
+- Say that public GitHub search may use the skill name and description.
+- Never ask the user to edit JSON manually unless they choose advanced mode.
+- If editing the manifest, preserve existing entries and only add confirmed
+  mappings.
+- Show exactly what will be saved before saving it.
+
+Before apply:
+
+- Summarize what will change.
+- List skipped skills separately.
+- Remind the user that backups will be created.
+- Ask for explicit confirmation.
+
 ## Commands
+
+For `doctor`:
+
+1. Run read-only diagnostics.
+2. Explain warnings in plain language.
+3. Recommend the safest next action.
+
+```bash
+python3 <skill-dir>/scripts/update_codex_assets.py --doctor --report skill-doctor-report.json
+```
 
 For `check`:
 
 1. Run inventory.
-2. If Not Mapped has anything, ask whether to map repos now or skip mapping for
+2. If Needs Setup has anything, ask whether to map repos now or skip mapping for
    this run.
 3. If the user maps repos, save only confident matches.
 4. Run a dry update check. Do not apply.
@@ -41,13 +80,14 @@ python3 <skill-dir>/scripts/update_codex_assets.py --json --report skill-update-
 For `update` or `run all`:
 
 1. Run inventory.
-2. If Not Mapped has anything, ask whether to map repos now or skip mapping for
+2. If Needs Setup has anything, ask whether to map repos now or skip mapping for
    this run.
 3. If the user maps repos, save only confident matches.
 4. Show the repo list with blanks for uncertain repos.
 5. Ask for update confirmation.
 6. Apply updates.
-7. After the first successful update, ask whether to create a weekly automation.
+7. After the first successful update, ask whether to create a weekly check
+   automation.
 
 ```bash
 python3 <skill-dir>/scripts/update_codex_assets.py --apply --json --report skill-update-report.json
@@ -69,14 +109,14 @@ access or a repo match is uncertain.
 
 Read `references/manifest.example.json` before editing a manifest.
 
-For each Not Mapped skill:
+For each Needs Setup skill:
 
 - Search public GitHub first. Use the exact skill name plus unique words from
   its frontmatter or heading.
 - Prefer the upstream public repo with strong evidence: exact `SKILL.md`
   match, same description/name, active repo, and visible community use such as
   stars.
-- Do not map Not Mapped skills to `catalystsystemslab/<skill>`,
+- Do not map Needs Setup skills to `catalystsystemslab/<skill>`,
   `isaaclim/<skill>`, or another user/org mirror unless the installed skill
   itself names that repo as its source or the user confirms it.
 - Trust a repo only when it contains that skill's `SKILL.md` at the repo root or
@@ -101,12 +141,16 @@ For each Not Mapped skill:
 
 - Default to dry-run unless the user clearly asks to update.
 - Back up before replacing a skill folder.
-- Never overwrite Not Mapped skills.
+- Never overwrite Needs Setup skills.
 - Do not migrate a skill to a similar repo without confirmation.
 - The script replaces whole skill folders; it does not merge local edits.
 - Codex plugin updates are Codex-only.
 
 ## Automation
 
-Offer weekly automation only after a successful update. Weekly is the default;
-bi-weekly is fine for stable setups.
+Offer weekly check automation only after a successful update. Weekly is the
+default; bi-weekly is fine for stable setups.
+
+Weekly automation must default to dry-run check mode. Do not create an
+automation that runs `--apply` unless the user explicitly asks for automatic
+updates and confirms they understand it will replace mapped skill folders.
