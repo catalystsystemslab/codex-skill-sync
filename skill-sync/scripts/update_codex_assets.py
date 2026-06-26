@@ -990,9 +990,21 @@ def append_section(lines: List[str], title: str, items: Sequence[Dict[str, Any]]
             lines.append(f"  Backup: {item['backup']}")
 
 
-def render_text(results: List[Dict[str, Any]]) -> str:
+def plugin_display_line(item: Dict[str, Any]) -> str:
+    status = item.get("status", "unknown")
+    label = item.get("name") or item.get("command") or ""
+    detail = item.get("reason") or item.get("error") or ""
+
+    if label and detail:
+        return f"- {status}: {label} - {detail}"
+    if label:
+        return f"- {status}: {label}"
+    return f"- {status}: {detail or item.get('type', 'Codex plugins')}"
+
+
+def render_text(results: List[Dict[str, Any]], apply: bool = False) -> str:
     changed = any(item.get("status") == "updated" for item in results)
-    title = "Skill Sync Update" if changed else "Skill Sync Check"
+    title = "Skill Sync Update" if apply or changed else "Skill Sync Check"
     skills = [item for item in results if item.get("type") == "skill"]
     plugins = [item for item in results if item.get("type", "").startswith("plugin")]
     updated = [item for item in skills if item.get("status") == "updated"]
@@ -1031,8 +1043,7 @@ def render_text(results: List[Dict[str, Any]]) -> str:
     if plugins:
         lines.append("Codex plugins:")
         for item in plugins:
-            detail = item.get("reason") or item.get("error") or item.get("status", "checked")
-            lines.append(f"- {item.get('status', 'unknown')}: {detail}")
+            lines.append(plugin_display_line(item))
 
     lines.append("Recommended next step:")
     if failed:
@@ -1063,10 +1074,8 @@ def render_inventory_text(records: List[Dict[str, Any]]) -> str:
         "unmapped": "Needs Setup",
     }
     lines: List[str] = []
-    skipped_plugins = [
-        item for item in records if item.get("type", "").startswith("plugin") and item.get("status") == "skipped"
-    ]
-    grouped_records = [item for item in records if item not in skipped_plugins]
+    plugin_records = [item for item in records if item.get("type", "").startswith("plugin")]
+    grouped_records = [item for item in records if item not in plugin_records]
     for group in ("official", "non_official", "unmapped"):
         lines.append(labels[group] + ":")
         items = [item for item in grouped_records if item.get("group") == group]
@@ -1078,11 +1087,10 @@ def render_inventory_text(records: List[Dict[str, Any]]) -> str:
             detail = item.get("reason") or item.get("error") or ""
             suffix = f" - {detail}" if detail else ""
             lines.append(f"- {item['type']}: {item['name']}{repo}{suffix}")
-    if skipped_plugins:
+    if plugin_records:
         lines.append("Plugins:")
-        for item in skipped_plugins:
-            detail = item.get("reason") or item.get("error") or ""
-            lines.append(f"- skipped: {detail}")
+        for item in plugin_records:
+            lines.append(plugin_display_line(item))
     counts = inventory_summary(grouped_records)
     failed = sum(1 for item in grouped_records if item.get("status") == "failed")
     needs_setup = counts.get("unmapped", 0)
@@ -1250,6 +1258,11 @@ def self_test() -> None:
         assert "Plugins:" in plugin_text
         assert "- 0 needs setup" in plugin_text
         assert "Codex plugins" not in plugin_text.split("Needs Setup:", 1)[1].split("Plugins:", 1)[0]
+        failed_plugin_text = render_inventory_text([codex_missing_record(True)])
+        assert "Plugins:" in failed_plugin_text
+        assert "failed:" in failed_plugin_text
+        assert "- 0 needs setup" in failed_plugin_text
+        assert "Codex plugins" not in failed_plugin_text.split("Needs Setup:", 1)[1].split("Plugins:", 1)[0]
         dry_text = render_text(
             [
                 {"type": "skill", "name": "my-skill", "status": "update_available"},
@@ -1298,6 +1311,27 @@ def self_test() -> None:
         assert "Review warnings before applying updates" in doctor_warn
         json_report = {"summary": summarize([{"status": "current"}]), "results": [{"status": "current"}]}
         assert json_report == {"summary": {"current": 1}, "results": [{"status": "current"}]}
+        plugin_update_text = render_text(
+            [
+                {"type": "plugin", "name": "github@openai-curated", "status": "updated"},
+                {
+                    "type": "plugin_marketplace",
+                    "command": "codex plugin marketplace upgrade --json",
+                    "status": "updated",
+                },
+            ],
+            apply=True,
+        )
+        assert "- updated: updated" not in plugin_update_text
+        assert "github@openai-curated" in plugin_update_text
+        assert "codex plugin marketplace upgrade --json" in plugin_update_text
+        apply_no_change = render_text(
+            [{"type": "skill", "name": "current-skill", "status": "current"}],
+            apply=True,
+        )
+        assert "Skill Sync Update" in apply_no_change
+        check_no_change = render_text([{"type": "skill", "name": "current-skill", "status": "current"}])
+        assert "Skill Sync Check" in check_no_change
 
         repo_root = root / "repo-root"
         repo_root.mkdir()
@@ -1516,7 +1550,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
-        print(render_text(results))
+        print(render_text(results, apply=args.apply))
     return 1 if any(item.get("status") == "failed" for item in results) else 0
 
 
