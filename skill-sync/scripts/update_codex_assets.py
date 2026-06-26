@@ -14,7 +14,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -69,18 +68,25 @@ def expand_path(value: str) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(value))).resolve()
 
 
-def run(cmd: Sequence[str], cwd: Optional[Path] = None) -> Tuple[int, str, str]:
+def run(cmd: Sequence[str], cwd: Optional[Path] = None, timeout: int = 120) -> Tuple[int, str, str]:
+    env = os.environ.copy()
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    env.setdefault("GIT_ASKPASS", "echo")
     try:
         proc = subprocess.run(
             list(cmd),
             cwd=str(cwd) if cwd else None,
+            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+            timeout=timeout,
         )
     except FileNotFoundError as exc:
         return 127, "", str(exc)
+    except subprocess.TimeoutExpired as exc:
+        return 124, (exc.stdout or "").strip(), (exc.stderr or f"timed out after {timeout}s").strip()
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
@@ -97,6 +103,17 @@ def load_manifest(path: Optional[str]) -> Dict[str, Any]:
         return json.load(fh)
 
 
+def existing_unique_paths(paths: Iterable[Path]) -> List[Path]:
+    seen: set[str] = set()
+    out: List[Path] = []
+    for path in paths:
+        key = str(path)
+        if key not in seen and path.exists():
+            seen.add(key)
+            out.append(path)
+    return out
+
+
 def default_roots(manifest: Dict[str, Any]) -> List[Path]:
     roots = [expand_path(p) for p in manifest.get("skill_roots", [])]
     roots.extend(
@@ -108,14 +125,7 @@ def default_roots(manifest: Dict[str, Any]) -> List[Path]:
             "~/.cursor/skills",
         )
     )
-    seen: set[str] = set()
-    out: List[Path] = []
-    for root in roots:
-        key = str(root)
-        if key not in seen and root.exists():
-            seen.add(key)
-            out.append(root)
-    return out
+    return existing_unique_paths(roots)
 
 
 def parse_github_url(url: str) -> Tuple[str, str, str]:
@@ -352,7 +362,7 @@ def clone_source(source: SkillSource, tmp: Path) -> Path:
     if source.branch:
         cmd.extend(["--branch", source.branch])
     cmd.extend([source.url, str(target)])
-    code, _, err = run(cmd)
+    code, _, err = run(cmd, timeout=300)
     if code != 0:
         raise RuntimeError(err or "git clone failed")
     sub = target / source.subpath if source.subpath else target
@@ -370,22 +380,52 @@ def copytree(src: Path, dst: Path) -> None:
     shutil.copytree(src, dst, symlinks=True, ignore=ignore)
 
 
-def replace_skill(local: Path, remote: Path) -> Path:
+def validate_local_skill_path(path: Path, roots: Sequence[Path]) -> None:
+    if path.is_symlink():
+        raise RuntimeError(
+            "local skill is a symlink; refusing to replace. "
+            "Update the source repo directly."
+        )
+    resolved = path.resolve()
+    if resolved in {Path("/"), Path.home().resolve()}:
+        raise RuntimeError(f"refusing to replace unsafe path: {resolved}")
+    if not (resolved / "SKILL.md").exists():
+        raise RuntimeError(f"local path has no SKILL.md: {resolved}")
+    allowed = any(resolved == root.resolve() or resolved.is_relative_to(root.resolve()) for root in roots)
+    if not allowed:
+        raise RuntimeError(f"local path is outside configured skill roots: {resolved}")
+
+
+def replace_skill(local: Path, remote: Path, roots: Sequence[Path]) -> Path:
+    validate_local_skill_path(local, roots)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
+    suffix = f"{timestamp}-{time.time_ns()}"
     backup_root = local.parent / ".skill-sync-backups"
     backup_root.mkdir(exist_ok=True)
-    backup = backup_root / f"{local.name}-{timestamp}"
-    staging = local.parent / f".{local.name}.update-{os.getpid()}"
-    if staging.exists():
-        shutil.rmtree(staging)
-    copytree(remote, staging)
-    shutil.copytree(local, backup, symlinks=True)
-    shutil.rmtree(local)
-    os.replace(staging, local)
+    backup = backup_root / f"{local.name}-{suffix}"
+    staging = local.parent / f".{local.name}.update-{os.getpid()}-{time.time_ns()}"
+    old_path = local.parent / f".{local.name}.old-{os.getpid()}-{time.time_ns()}"
+    try:
+        copytree(remote, staging)
+        shutil.copytree(local, backup, symlinks=True)
+        os.replace(local, old_path)
+        try:
+            os.replace(staging, local)
+        except Exception:
+            if not local.exists() and old_path.exists():
+                os.replace(old_path, local)
+            raise
+        if old_path.exists():
+            shutil.rmtree(old_path)
+    finally:
+        if old_path.exists() and not local.exists():
+            os.replace(old_path, local)
+        if staging.exists():
+            shutil.rmtree(staging)
     return backup
 
 
-def check_skill(source: SkillSource, apply: bool) -> Dict[str, Any]:
+def check_skill(source: SkillSource, apply: bool, roots: Sequence[Path]) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "type": "skill",
         "name": source.name,
@@ -401,6 +441,10 @@ def check_skill(source: SkillSource, apply: bool) -> Dict[str, Any]:
         result["status"] = "failed"
         result["error"] = "local path missing"
         return result
+    if not (source.path / "SKILL.md").exists():
+        result["status"] = "failed"
+        result["error"] = "local path has no SKILL.md"
+        return result
     if not source.url:
         result["status"] = "skipped"
         result["reason"] = "no remote url"
@@ -409,6 +453,13 @@ def check_skill(source: SkillSource, apply: bool) -> Dict[str, Any]:
         result["status"] = "skipped"
         result["reason"] = "placeholder GitHub URL; add the real repo or mark local"
         return result
+    if apply:
+        try:
+            validate_local_skill_path(source.path, roots)
+        except RuntimeError as exc:
+            result["status"] = "failed"
+            result["error"] = str(exc)
+            return result
 
     with tempfile.TemporaryDirectory(prefix="skill-update-") as td:
         try:
@@ -417,7 +468,7 @@ def check_skill(source: SkillSource, apply: bool) -> Dict[str, Any]:
             if same:
                 result["status"] = "current"
             elif apply:
-                backup = replace_skill(source.path, remote)
+                backup = replace_skill(source.path, remote, roots)
                 result["status"] = "updated"
                 result["backup"] = str(backup)
             else:
@@ -547,7 +598,9 @@ def update_plugins(manifest: Dict[str, Any], apply: bool) -> List[Dict[str, Any]
             "error": err,
         }
     )
-    if code == 127:
+    if code != 0:
+        if code != 127:
+            results.append({"type": "plugin", "status": "skipped", "reason": "marketplace upgrade failed"})
         return results
 
     plugins = plugins_from_json(manifest.get("plugins", []))
@@ -671,6 +724,7 @@ def self_test() -> None:
         assert plugins_from_json(
             {"installed": [{"pluginId": "linear@openai-curated", "installed": False}]}
         ) == []
+        assert existing_unique_paths([source_root, source_root]) == [source_root]
 
         if run(["git", "--version"])[0] == 0:
             remote = root / "remote-skill"
@@ -685,11 +739,30 @@ def self_test() -> None:
             local = root / "local-skill"
             local.mkdir()
             (local / "SKILL.md").write_text("---\nname: demo\n---\nold\n", encoding="utf-8")
+            validate_local_skill_path(local, [root])
+            outside_root = root / "outside-root"
+            outside_root.mkdir()
+            outside = outside_root / "outside-skill"
+            outside.mkdir()
+            (outside / "SKILL.md").write_text("outside\n", encoding="utf-8")
+            try:
+                validate_local_skill_path(outside, [source_root])
+                raise AssertionError("outside skill path should fail validation")
+            except RuntimeError as exc:
+                assert "outside configured skill roots" in str(exc)
+            if hasattr(os, "symlink"):
+                linked = root / "linked-skill"
+                linked.symlink_to(local, target_is_directory=True)
+                try:
+                    validate_local_skill_path(linked, [root])
+                    raise AssertionError("symlinked skill path should fail validation")
+                except RuntimeError as exc:
+                    assert "symlink" in str(exc)
             placeholder = SkillSource(name="x", path=local, url="https://github.com/username/repo")
-            assert check_skill(placeholder, apply=False)["status"] == "skipped"
+            assert check_skill(placeholder, apply=False, roots=[root])["status"] == "skipped"
             source = SkillSource(name="local-skill", path=local, url=str(remote))
-            assert check_skill(source, apply=False)["status"] == "update_available"
-            applied = check_skill(source, apply=True)
+            assert check_skill(source, apply=False, roots=[root])["status"] == "update_available"
+            applied = check_skill(source, apply=True, roots=[root])
             assert applied["status"] == "updated"
             assert Path(applied["backup"]).exists()
             assert "new" in (local / "SKILL.md").read_text(encoding="utf-8")
@@ -702,8 +775,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--apply", action="store_true", help="Apply updates. Default is dry-run.")
     parser.add_argument("--inventory", action="store_true", help="List skills/plugins by mapping group")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
-    parser.add_argument("--no-plugins", action="store_true", help="Do not refresh Codex plugins")
-    parser.add_argument("--plugins-only", action="store_true", help="Only refresh Codex plugins")
+    plugin_scope = parser.add_mutually_exclusive_group()
+    plugin_scope.add_argument("--no-plugins", action="store_true", help="Do not refresh Codex plugins")
+    plugin_scope.add_argument("--plugins-only", action="store_true", help="Only refresh Codex plugins")
     parser.add_argument("--report", help="Write JSON report to this path")
     parser.add_argument("--self-test", action="store_true", help="Run built-in smoke test")
     args = parser.parse_args(argv)
@@ -716,6 +790,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     manifest = load_manifest(args.manifest)
     roots = default_roots(manifest)
     roots.extend(expand_path(p) for p in args.skill_root)
+    roots = existing_unique_paths(roots)
 
     if args.inventory:
         records: List[Dict[str, Any]] = []
@@ -739,7 +814,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sources = skill_sources(manifest, roots)
         known_paths = {str(s.path) for s in sources}
         for source in sorted(sources, key=lambda s: str(s.path)):
-            results.append(check_skill(source, args.apply))
+            results.append(check_skill(source, args.apply, roots))
         for path in all_skill_dirs(roots):
             if str(path) not in known_paths:
                 results.append(

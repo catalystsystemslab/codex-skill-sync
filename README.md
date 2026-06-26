@@ -117,6 +117,13 @@ python3 skill-sync/scripts/update_codex_assets.py --self-test
 Confirmed mappings are saved in `~/.codex/skill-sources.json` by default. You
 can also pass another manifest with `--manifest`.
 
+Manifest search order is:
+
+1. `--manifest <path>`
+2. `~/.codex/skill-sources.json`
+3. `./skill-sources.json`
+4. `./skills-sources.json`
+
 Only map repos you can confirm. If you cannot find the repo, leave it blank.
 Mark a skill local only when the user says it is private or local-only.
 When mapping public skills, search for the upstream public repo first. Do not
@@ -166,10 +173,21 @@ for the full template.
 - `--apply` is required for filesystem or plugin changes.
 - Every skill replacement gets a timestamped backup in
   `.skill-sync-backups/` under the skill root.
+- Apply refuses to replace a path outside configured skill roots.
+- Apply refuses to replace symlinked skill installs. Update the symlink source
+  repo directly.
 - Unknown skills are reported, not overwritten.
 - Local skills marked with `"kind": "local"` are always skipped.
 - The script replaces whole skill folders. Do not use it for skills with local
   edits you want merged.
+
+Restore a skill from backup:
+
+```bash
+rm -rf ~/.codex/skills/my-skill
+cp -R ~/.codex/skills/.skill-sync-backups/my-skill-20260626-120000-1234567890 \
+  ~/.codex/skills/my-skill
+```
 
 ## Codex Plugin Updates
 
@@ -194,6 +212,8 @@ update features.
 - Plugin updates require the Codex CLI.
 - Source discovery is conservative. Copied monorepo folders usually need a
   manifest.
+- GitHub `/tree/<branch>/<subpath>` URLs are ambiguous when branch names contain
+  `/`; use explicit `branch` and `subpath` manifest fields for those branches.
 
 ## License
 
