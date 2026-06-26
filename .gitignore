@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.DS_Store
+.skill-plugin-updater-backups/
+skill-sources.json
+report.json
+skill-update-report.json

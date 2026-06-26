@@ -1,0 +1,4 @@
+interface:
+  display_name: "Skill Sync"
+  short_description: "Update SKILL.md skills and Codex plugins"
+  default_prompt: "Use $skill-sync run all to list installed skills/plugins, map missing repos, check updates, and update after confirmation."

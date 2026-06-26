@@ -1,0 +1,40 @@
+{
+  "skill_roots": [
+    "~/.codex/skills",
+    "~/.agents/skills",
+    "~/.claude/skills",
+    "~/.cursor/skills"
+  ],
+  "skills": [
+    {
+      "name": "example-monorepo-skill",
+      "root": "~/.codex/skills",
+      "url": "https://github.com/example/agent-skills",
+      "branch": "main",
+      "subpath": "skills/example-monorepo-skill"
+    },
+    {
+      "name": "example-root-skill",
+      "root": "~/.codex/skills",
+      "url": "https://github.com/example/example-root-skill",
+      "branch": "main",
+      "subpath": ""
+    },
+    {
+      "name": "my-private-skill",
+      "root": "~/.codex/skills",
+      "kind": "local"
+    }
+  ],
+  "plugins": [
+    {
+      "id": "github",
+      "marketplace": "openai-curated"
+    },
+    {
+      "id": "browser",
+      "marketplace": "openai-bundled"
+    }
+  ]
+}
+
