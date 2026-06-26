@@ -1,5 +1,7 @@
 # Skill Sync
 
+[![CI](https://github.com/catalystsystemslab/codex-skill-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/catalystsystemslab/codex-skill-sync/actions/workflows/ci.yml)
+
 Keep your Codex skills updated safely.
 
 ## Start Here
@@ -18,6 +20,16 @@ Nothing will be updated until you approve it.
 - Python 3.9+
 - Git
 - Codex CLI only if you want Codex plugin updates
+
+## Verified by CI
+
+Every push runs:
+
+- Python compile check
+- Built-in self-test
+- Doctor text mode
+- Doctor JSON mode
+- Friendly missing-manifest failure check
 
 ## What Skill Sync Will Never Do
 
@@ -292,6 +304,13 @@ ln -s "$PWD/skill-sync" ~/.codex/skills/skill-sync
 
 Symlink installs are for developers. Skill Sync will not auto-replace symlinked
 skills; update the source repo directly.
+
+Before tagging a release:
+
+- Run `python3 skill-sync/scripts/update_codex_assets.py --self-test`
+- Run `python3 -m compileall skill-sync/scripts/update_codex_assets.py`
+- Run `python3 skill-sync/scripts/update_codex_assets.py --doctor`
+- Confirm GitHub Actions is green.
 
 ## Limitations
 

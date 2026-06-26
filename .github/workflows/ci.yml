@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile
+        run: python -m compileall skill-sync/scripts/update_codex_assets.py
+
+      - name: Self-test
+        run: python skill-sync/scripts/update_codex_assets.py --self-test
+
+      - name: Doctor text
+        run: python skill-sync/scripts/update_codex_assets.py --doctor
+
+      - name: Doctor JSON
+        run: python skill-sync/scripts/update_codex_assets.py --doctor --json
+
+      - name: Missing manifest fails cleanly
+        run: |
+          set +e
+          output="$(python skill-sync/scripts/update_codex_assets.py --manifest /tmp/skill-sync-missing.json --json 2>&1)"
+          code="$?"
+          set -e
+          echo "$output"
+          test "$code" -ne 0
+          echo "$output" | grep -q "Manifest problem"
+          ! echo "$output" | grep -q "Traceback"
+
+      - name: Whitespace check
+        run: git diff --check
