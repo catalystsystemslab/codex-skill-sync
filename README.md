@@ -15,6 +15,10 @@ Then run /skill-sync doctor
 
 Nothing will be updated until you approve it.
 
+## Demo
+
+![Skill Sync demo showing doctor, check, and update output](docs/skill-sync-demo.gif)
+
 ## Requirements
 
 - Python 3.9+
