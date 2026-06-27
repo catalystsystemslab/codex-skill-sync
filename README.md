@@ -37,6 +37,18 @@ Every push runs:
 - Doctor JSON mode
 - Friendly missing-manifest failure check
 
+
+## Contributing and Beta Feedback
+
+Skill Sync is in public beta. Contributions and feedback are welcome through GitHub issues and pull requests.
+
+- Beta testing checklist: [`docs/TESTING.md`](docs/TESTING.md)
+- Feedback guide: [`docs/FEEDBACK.md`](docs/FEEDBACK.md)
+- Contribution guide: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- Security policy: [`SECURITY.md`](SECURITY.md)
+
+Please open an issue before large runtime behavior changes, especially anything related to applying updates, mapping sources, restore behavior, or remote repository handling.
+
 ## What Skill Sync Will Never Do
 
 - It will not update unknown skills.

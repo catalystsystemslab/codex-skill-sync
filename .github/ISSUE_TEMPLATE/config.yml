@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Skill Sync discussions and general questions
+    url: https://github.com/catalystsystemslab/codex-skill-sync/issues
+    about: Open an issue using the closest template if you are not sure where to start.
