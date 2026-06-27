@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/catalystsystemslab/codex-skill-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/catalystsystemslab/codex-skill-sync/actions/workflows/ci.yml)
 
+Languages: [English](README.md) | [简体中文](README.zh-CN.md)
+
 Keep your Codex skills updated safely.
 
 ## Start Here
@@ -43,7 +45,10 @@ Every push runs:
 Skill Sync is in public beta. Contributions and feedback are welcome through GitHub issues and pull requests.
 
 - Beta testing checklist: [`docs/TESTING.md`](docs/TESTING.md)
+- Chinese README: [`README.zh-CN.md`](README.zh-CN.md)
+- Chinese beta testing checklist: [`docs/zh-CN/TESTING.md`](docs/zh-CN/TESTING.md)
 - Feedback guide: [`docs/FEEDBACK.md`](docs/FEEDBACK.md)
+- Chinese feedback guide: [`docs/zh-CN/FEEDBACK.md`](docs/zh-CN/FEEDBACK.md)
 - Contribution guide: [`CONTRIBUTING.md`](CONTRIBUTING.md)
 - Security policy: [`SECURITY.md`](SECURITY.md)
 

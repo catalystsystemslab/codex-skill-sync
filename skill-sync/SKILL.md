@@ -11,6 +11,27 @@ Keep installed skills and Codex plugins current. `doctor` is read-only setup
 diagnostics. `check`, `update`, and `run all` all start the same inventory and
 mapping flow.
 
+## Language
+
+Reply in the user's language by default.
+
+- If the user writes in English, respond in English.
+- If the user writes in Chinese, respond in Simplified Chinese.
+- If the user mixes English and Chinese, use the dominant language.
+- Keep commands, file paths, JSON keys, status values, and shell commands unchanged.
+- Translate explanations, summaries, warnings, and recommendations.
+
+Important label translations:
+
+- Official / 官方
+- Community / 社区
+- Needs Setup / 需要设置
+- `current` / 已是最新
+- `update_available` / 有可用更新
+- `updated` / 已更新
+- `skipped` / 已跳过
+- `failed` / 失败
+
 ## Start Here
 
 For `check`, `update`, and `run all`, first list what is installed:
