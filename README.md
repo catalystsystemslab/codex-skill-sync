@@ -129,7 +129,9 @@ What happens:
 
 ## What You Will See
 
-`/skill-sync doctor`:
+Each command prints a clear summary so you know exactly what happened — no cryptic logs.
+
+`/skill-sync doctor` checks that everything is set up correctly before you do anything else:
 
 ```text
 Skill Sync Doctor
@@ -139,7 +141,7 @@ Recommended next step:
 Run /skill-sync check.
 ```
 
-`/skill-sync check`:
+`/skill-sync check` lists your skills and shows which ones can be updated — no changes are made:
 
 ```text
 Skill Sync Check
@@ -150,7 +152,7 @@ Recommended next step:
 Run /skill-sync update if you want to apply the available skill updates.
 ```
 
-`/skill-sync update`:
+`/skill-sync update` applies the updates after asking for your confirmation:
 
 ```text
 Skill Sync Update
