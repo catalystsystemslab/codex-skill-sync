@@ -17,7 +17,13 @@ Nothing will be updated until you approve it.
 
 ## Demo
 
+Terminal output:
+
 ![Skill Sync demo showing doctor, check, and update output](docs/skill-sync-demo.gif)
+
+Codex mapping flow with sample skills:
+
+![Skill Sync Codex mapping flow demo](docs/skill-sync-codex-mapping-demo.gif)
 
 ## Requirements
 
